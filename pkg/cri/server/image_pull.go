@@ -37,6 +37,7 @@ import (
 	distribution "github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/remotes/docker/config"
+	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/imgcrypt"
 	"github.com/containerd/imgcrypt/images/encryption"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -122,6 +123,7 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 		containerd.WithPullLabel(imageLabelKey, imageLabelValue),
 		containerd.WithMaxConcurrentDownloads(c.config.MaxConcurrentDownloads),
 		containerd.WithImageHandler(imageHandler),
+		c.authConfigOpts(r.GetAuth()),
 	}
 
 	pullOpts = append(pullOpts, c.encryptedImagesPullOpts()...)
@@ -504,6 +506,27 @@ func (c *criService) encryptedImagesPullOpts() []containerd.RemoteOpt {
 		return []containerd.RemoteOpt{opt}
 	}
 	return nil
+}
+
+func WithUnpackConfigAuthConfigOpts(opt snapshots.Opt) containerd.UnpackOpt {
+	return func(_ context.Context, uc *containerd.UnpackConfig) error {
+		uc.SnapshotOpts = append(uc.SnapshotOpts, opt)
+		return nil
+	}
+}
+
+func (c *criService) authConfigOpts(auth *runtime.AuthConfig) containerd.RemoteOpt {
+	authMap := map[string]string{
+		"containerd.io/snapshot/authconfig/username":      auth.Username,
+		"containerd.io/snapshot/authconfig/password":      auth.Password,
+		"containerd.io/snapshot/authconfig/auth":          auth.Auth,
+		"containerd.io/snapshot/authconfig/serverAddress": auth.ServerAddress,
+		"containerd.io/snapshot/authconfig/identityToken": auth.IdentityToken,
+		"containerd.io/snapshot/authconfig/registryToken": auth.RegistryToken,
+	}
+	authConfigOpt := WithUnpackConfigAuthConfigOpts(snapshots.WithLabels(authMap))
+	opt := containerd.WithUnpackOpts([]containerd.UnpackOpt{authConfigOpt})
+	return opt
 }
 
 const (
