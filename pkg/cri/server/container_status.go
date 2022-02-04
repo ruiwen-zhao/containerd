@@ -59,7 +59,11 @@ func (c *criService) ContainerStatus(ctx context.Context, r *runtime.ContainerSt
 			imageRef = repoDigests[0]
 		}
 	}
-	status := toCRIContainerStatus(container, spec, imageRef)
+	status, err := toCRIContainerStatus(ctx, container, spec, imageRef)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get CRI container status")
+	}
+
 	if status.GetCreatedAt() == 0 {
 		// CRI doesn't allow CreatedAt == 0.
 		info, err := container.Container.Info(ctx)
@@ -81,7 +85,7 @@ func (c *criService) ContainerStatus(ctx context.Context, r *runtime.ContainerSt
 }
 
 // toCRIContainerStatus converts internal container object to CRI container status.
-func toCRIContainerStatus(container containerstore.Container, spec *runtime.ImageSpec, imageRef string) *runtime.ContainerStatus {
+func toCRIContainerStatus(ctx context.Context, container containerstore.Container, spec *runtime.ImageSpec, imageRef string) (*runtime.ContainerStatus, error) {
 	meta := container.Metadata
 	status := container.Status.Get()
 	reason := status.Reason
@@ -103,6 +107,11 @@ func toCRIContainerStatus(container containerstore.Container, spec *runtime.Imag
 		st, ft = status.StartedAt, status.FinishedAt
 	}
 
+	runtimeSpec, err := container.Container.Spec(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get container runtime spec")
+	}
+
 	return &runtime.ContainerStatus{
 		Id:          meta.ID,
 		Metadata:    meta.Config.GetMetadata(),
@@ -119,7 +128,18 @@ func toCRIContainerStatus(container containerstore.Container, spec *runtime.Imag
 		Annotations: meta.Config.GetAnnotations(),
 		Mounts:      meta.Config.GetMounts(),
 		LogPath:     meta.LogPath,
-	}
+		Resources: &runtime.ContainerResources{
+			Linux: &runtime.LinuxContainerResources{
+				CpuPeriod:          int64(*runtimeSpec.Linux.Resources.CPU.Period),
+				CpuQuota:           *runtimeSpec.Linux.Resources.CPU.Quota,
+				CpuShares:          int64(*runtimeSpec.Linux.Resources.CPU.Shares),
+				MemoryLimitInBytes: *runtimeSpec.Linux.Resources.Memory.Limit,
+				OomScoreAdj:        int64(*runtimeSpec.Process.OOMScoreAdj),
+				CpusetCpus:         runtimeSpec.Linux.Resources.CPU.Cpus,
+				CpusetMems:         runtimeSpec.Linux.Resources.CPU.Mems,
+			},
+		},
+	}, nil
 }
 
 // ContainerInfo is extra information for a container.

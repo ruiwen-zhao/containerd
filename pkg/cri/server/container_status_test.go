@@ -20,16 +20,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/oci"
 	containerstore "github.com/containerd/containerd/pkg/cri/store/container"
 	imagestore "github.com/containerd/containerd/pkg/cri/store/image"
 )
 
 func getContainerStatusTestData() (*containerstore.Metadata, *containerstore.Status,
-	*imagestore.Image, *runtime.ContainerStatus) {
+	*imagestore.Image, *oci.Spec, *runtime.ContainerStatus) {
 	imageID := "sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	testID := "test-id"
 	config := &runtime.ContainerConfig{
@@ -67,6 +70,32 @@ func getContainerStatusTestData() (*containerstore.Metadata, *containerstore.Sta
 			"gcr.io/library/busybox@sha256:e6693c20186f837fc393390135d8a598a96a833917917789d63766cab6c59582",
 		},
 	}
+
+	oomScoreAdj := int(500)
+	memoryLimit := int64(1024)
+	cpuPeriod := uint64(100)
+	cpuQuota := int64(200)
+	cpuShares := uint64(5000)
+	spec := &oci.Spec{
+		Process: &specs.Process{
+			OOMScoreAdj: &oomScoreAdj,
+		},
+		Linux: &specs.Linux{
+			Resources: &specs.LinuxResources{
+				Memory: &specs.LinuxMemory{
+					Limit: &memoryLimit,
+				},
+				CPU: &specs.LinuxCPU{
+					Period: &cpuPeriod,
+					Quota:  &cpuQuota,
+					Shares: &cpuShares,
+					Cpus:   "4-5",
+					Mems:   "6-7",
+				},
+			},
+		},
+	}
+
 	expected := &runtime.ContainerStatus{
 		Id:          testID,
 		Metadata:    config.GetMetadata(),
@@ -79,9 +108,20 @@ func getContainerStatusTestData() (*containerstore.Metadata, *containerstore.Sta
 		Annotations: config.GetAnnotations(),
 		Mounts:      config.GetMounts(),
 		LogPath:     "test-log-path",
+		Resources: &runtime.ContainerResources{
+			Linux: &runtime.LinuxContainerResources{
+				CpuPeriod:          int64(*spec.Linux.Resources.CPU.Period),
+				CpuQuota:           *spec.Linux.Resources.CPU.Quota,
+				CpuShares:          int64(*spec.Linux.Resources.CPU.Shares),
+				MemoryLimitInBytes: *spec.Linux.Resources.Memory.Limit,
+				OomScoreAdj:        int64(*spec.Process.OOMScoreAdj),
+				CpusetCpus:         spec.Linux.Resources.CPU.Cpus,
+				CpusetMems:         spec.Linux.Resources.CPU.Mems,
+			},
+		},
 	}
 
-	return metadata, status, image, expected
+	return metadata, status, image, spec, expected
 }
 
 func TestToCRIContainerStatus(t *testing.T) {
@@ -127,7 +167,7 @@ func TestToCRIContainerStatus(t *testing.T) {
 			expectedReason: errorExitReason,
 		},
 	} {
-		metadata, status, _, expected := getContainerStatusTestData()
+		metadata, status, _, spec, expected := getContainerStatusTestData()
 		// Update status with test case.
 		status.StartedAt = test.startedAt
 		status.FinishedAt = test.finishedAt
@@ -137,6 +177,7 @@ func TestToCRIContainerStatus(t *testing.T) {
 		container, err := containerstore.NewContainer(
 			*metadata,
 			containerstore.WithFakeStatus(*status),
+			containerstore.WithContainer(getFakeContainerWithSpec(spec)),
 		)
 		assert.NoError(t, err)
 		// Set expectation based on test case.
@@ -146,16 +187,27 @@ func TestToCRIContainerStatus(t *testing.T) {
 		expected.ExitCode = test.exitCode
 		expected.Message = test.message
 		patchExceptedWithState(expected, test.expectedState)
-		containerStatus := toCRIContainerStatus(container,
+		containerStatus, err := toCRIContainerStatus(context.Background(), container,
 			expected.Image,
 			expected.ImageRef)
+		assert.NoError(t, err)
 		assert.Equal(t, expected, containerStatus, desc)
 	}
 }
 
+func getFakeContainerWithSpec(spec *oci.Spec) containerd.Container {
+	c := &fakeContainer{}
+	c.WithSpec(spec)
+	return c
+}
+
+func pointerize(n int) *int {
+	return &n
+}
+
 // TODO(mikebrow): add a fake containerd container.Container.Spec client api so we can test verbose is true option
 func TestToCRIContainerInfo(t *testing.T) {
-	metadata, status, _, _ := getContainerStatusTestData()
+	metadata, status, _, _, _ := getContainerStatusTestData()
 	container, err := containerstore.NewContainer(
 		*metadata,
 		containerstore.WithFakeStatus(*status),
@@ -211,7 +263,7 @@ func TestContainerStatus(t *testing.T) {
 	} {
 		t.Logf("TestCase %q", desc)
 		c := newTestCRIService()
-		metadata, status, image, expected := getContainerStatusTestData()
+		metadata, status, image, spec, expected := getContainerStatusTestData()
 		// Update status with test case.
 		status.StartedAt = test.startedAt
 		status.FinishedAt = test.finishedAt
@@ -219,6 +271,7 @@ func TestContainerStatus(t *testing.T) {
 		container, err := containerstore.NewContainer(
 			*metadata,
 			containerstore.WithFakeStatus(*status),
+			containerstore.WithContainer(getFakeContainerWithSpec(spec)),
 		)
 		assert.NoError(t, err)
 		if test.exist {
